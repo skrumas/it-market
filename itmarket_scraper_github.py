@@ -184,7 +184,7 @@ def scrape_product_variants(url):
         logger.error(f"  Error: {e}")
         return None
 
-def process_urls(input_excel, output_excel, max_workers=8):
+def process_urls(input_excel, output_excel, max_workers=2):
     """Excel'den URL'leri oku ve parallel olarak işle (GitHub Actions optimized)"""
     
     logger.info(f"Excel okunuyor: {input_excel}")
