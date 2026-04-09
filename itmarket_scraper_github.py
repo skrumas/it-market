@@ -64,34 +64,29 @@ def get_product_name(soup, json_data_list):
     if h1:
         span = h1.find('span', class_='base')
         if span:
-            product_name = span.get_text(strip=True)
-            return product_name
+            return span.get_text(strip=True)
         else:
-            product_name = h1.get_text(strip=True)
-            return product_name
+            return h1.get_text(strip=True)
     
     # YÖNTEM 3: Herhangi bir H1
     h1 = soup.find('h1')
     if h1:
-        product_name = h1.get_text(strip=True)
-        return product_name
+        return h1.get_text(strip=True)
     
     # YÖNTEM 4: Title tag
     title = soup.find('title')
     if title:
-        product_name = title.get_text(strip=True).split('|')[0].strip()
-        return product_name
+        return title.get_text(strip=True).split('|')[0].strip()
     
     # YÖNTEM 5: Meta property og:title
     meta = soup.find('meta', property='og:title')
     if meta and meta.get('content'):
-        product_name = meta['content']
-        return product_name
+        return meta['content']
     
     return "UNKNOWN"
 
-def scrape_product_variants(url):
-    """Ürün varyantlarını scrape et"""
+def scrape_product_variants(url, max_retries=3):
+    """Ürün varyantlarını scrape et — 503'te retry yapar"""
     
     logger.info(f"Scraping: {url}")
     
@@ -101,100 +96,103 @@ def scrape_product_variants(url):
         'Accept-Language': 'de-DE,de;q=0.9,en;q=0.8',
     }
     
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        
-        if response.status_code != 200:
-            logger.warning(f"  HTTP {response.status_code}")
-            return None
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # JSON-LD script'lerini bul
-        scripts = soup.find_all('script', type='application/ld+json')
-        
-        json_data_list = []
-        all_variants = []
-        
-        for script in scripts:
-            try:
-                data = json.loads(script.string)
-                json_data_list.append(data)
-                
-                # Liste formatında
-                if isinstance(data, list):
-                    for item in data:
-                        if item.get('@type') == 'Product' and 'offers' in item:
-                            offer_count = len(item['offers'])
-                            
-                            for offer in item['offers']:
-                                condition = parse_condition(offer['itemCondition'])
-                                offer_url = offer.get('url', '')
-                                availability = detect_availability_from_url(offer_url)
-                                price = offer['price']
-                                
-                                variant = {
-                                    'condition': condition,
-                                    'availability': availability,
-                                    'price': price,
-                                    'url': offer_url,
-                                    'offer_count': offer_count
-                                }
-                                all_variants.append(variant)
-                
-                # Tek obje formatında
-                elif data.get('@type') == 'Product' and 'offers' in data:
-                    offer_count = len(data['offers'])
-                    
-                    for offer in data['offers']:
-                        condition = parse_condition(offer['itemCondition'])
-                        offer_url = offer.get('url', '')
-                        availability = detect_availability_from_url(offer_url)
-                        price = offer['price']
-                        
-                        variant = {
-                            'condition': condition,
-                            'availability': availability,
-                            'price': price,
-                            'url': offer_url,
-                            'offer_count': offer_count
-                        }
-                        all_variants.append(variant)
-                        
-            except Exception as e:
-                logger.debug(f"  JSON parse error: {e}")
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+            
+            if response.status_code == 503:
+                wait = attempt * 10  # 10s, 20s, 30s
+                logger.warning(f"  HTTP 503 — {attempt}/{max_retries} deneme, {wait}s bekleniyor...")
+                time.sleep(wait)
                 continue
-        
-        # En çok offer'i olan Product'tan gelen varyantları seç
-        if all_variants:
-            max_offer_count = max(v['offer_count'] for v in all_variants)
-            variants = [v for v in all_variants if v['offer_count'] == max_offer_count]
-        else:
-            variants = []
-        
-        # Ürün adını al
-        product_name = get_product_name(soup, json_data_list)
-        
-        return {
-            'product_name': product_name,
-            'variants': variants
-        }
-        
-    except Exception as e:
-        logger.error(f"  Error: {e}")
-        return None
+            
+            if response.status_code != 200:
+                logger.warning(f"  HTTP {response.status_code}")
+                return None
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # JSON-LD script'lerini bul
+            scripts = soup.find_all('script', type='application/ld+json')
+            
+            json_data_list = []
+            all_variants = []
+            
+            for script in scripts:
+                try:
+                    data = json.loads(script.string)
+                    json_data_list.append(data)
+                    
+                    # Liste formatında
+                    if isinstance(data, list):
+                        for item in data:
+                            if item.get('@type') == 'Product' and 'offers' in item:
+                                offer_count = len(item['offers'])
+                                for offer in item['offers']:
+                                    condition = parse_condition(offer['itemCondition'])
+                                    offer_url = offer.get('url', '')
+                                    availability = detect_availability_from_url(offer_url)
+                                    price = offer['price']
+                                    all_variants.append({
+                                        'condition': condition,
+                                        'availability': availability,
+                                        'price': price,
+                                        'url': offer_url,
+                                        'offer_count': offer_count
+                                    })
+                    
+                    # Tek obje formatında
+                    elif data.get('@type') == 'Product' and 'offers' in data:
+                        offer_count = len(data['offers'])
+                        for offer in data['offers']:
+                            condition = parse_condition(offer['itemCondition'])
+                            offer_url = offer.get('url', '')
+                            availability = detect_availability_from_url(offer_url)
+                            price = offer['price']
+                            all_variants.append({
+                                'condition': condition,
+                                'availability': availability,
+                                'price': price,
+                                'url': offer_url,
+                                'offer_count': offer_count
+                            })
+                            
+                except Exception as e:
+                    logger.debug(f"  JSON parse error: {e}")
+                    continue
+            
+            # En çok offer'i olan Product'tan gelen varyantları seç
+            if all_variants:
+                max_offer_count = max(v['offer_count'] for v in all_variants)
+                variants = [v for v in all_variants if v['offer_count'] == max_offer_count]
+            else:
+                variants = []
+            
+            product_name = get_product_name(soup, json_data_list)
+            
+            return {
+                'product_name': product_name,
+                'variants': variants
+            }
+            
+        except Exception as e:
+            logger.error(f"  Error (deneme {attempt}): {e}")
+            if attempt < max_retries:
+                time.sleep(5)
+            else:
+                return None
 
-def process_urls(input_excel, output_excel, max_workers=2):
-    """Excel'den URL'leri oku ve parallel olarak işle (GitHub Actions optimized)"""
+    return None
+
+def process_urls(input_excel, output_excel, max_workers=1):
+    """Excel'den URL'leri oku ve işle"""
     
     logger.info(f"Excel okunuyor: {input_excel}")
     df_input = pd.read_excel(input_excel)
     
-    # URL sütununu bul (ilk sütun varsayılan)
     url_column = df_input.columns[0]
     urls = df_input[url_column].tolist()
     
-    # URL'leri temizle
     urls = [str(url).strip() for url in urls if pd.notna(url)]
     urls = [url if url.startswith('http') else 'https://' + url for url in urls]
     
@@ -210,7 +208,6 @@ def process_urls(input_excel, output_excel, max_workers=2):
             data = scrape_product_variants(url)
             
             if data and data['variants']:
-                # 4 varyant için sözlük
                 variant_dict = {
                     'Generalüberholt - ab Lager': '',
                     'Generalüberholt - mit Lieferzeit': '',
@@ -218,17 +215,11 @@ def process_urls(input_excel, output_excel, max_workers=2):
                     'Neu - mit Lieferzeit': ''
                 }
                 
-                # Varyantları eşleştir
                 for variant in data['variants']:
-                    condition = variant['condition']
-                    availability = variant['availability']
-                    price = variant['price']
-                    key = f"{condition} - {availability}"
-                    
+                    key = f"{variant['condition']} - {variant['availability']}"
                     if key in variant_dict:
-                        variant_dict[key] = price
+                        variant_dict[key] = variant['price']
                 
-                # Sonuç satırı
                 result = {
                     'Url': url,
                     'Product Name': data['product_name'],
@@ -238,7 +229,6 @@ def process_urls(input_excel, output_excel, max_workers=2):
                     'Neu - mit Lieferzeit': variant_dict['Neu - mit Lieferzeit']
                 }
             else:
-                # Hata durumunda boş satır
                 result = {
                     'Url': url,
                     'Product Name': data['product_name'] if data else 'ERROR',
@@ -250,10 +240,10 @@ def process_urls(input_excel, output_excel, max_workers=2):
             
             with results_lock:
                 results.append(result)
-                logger.info(f"[{len(results)}/{len(urls)}] ✓ {data['product_name'] if data else 'ERROR'}")
+                logger.info(f"[{len(results)}/{len(urls)}] ✓ {result['Product Name']}")
             
-            # Adaptive delay - rate limiting
-            time.sleep(0.5)
+            # Rate limiting — 3 saniye bekle
+            time.sleep(3)
             
         except Exception as e:
             logger.error(f"[{index}] Exception: {e}")
@@ -267,8 +257,7 @@ def process_urls(input_excel, output_excel, max_workers=2):
                     'Neu - mit Lieferzeit': ''
                 })
     
-    # Parallel processing
-    logger.info(f"Parallel scraping basliyor ({max_workers} workers)...\n")
+    logger.info(f"Scraping basliyor ({max_workers} worker)...\n")
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(process_single_url, item): item for item in enumerate(urls)}
@@ -279,11 +268,9 @@ def process_urls(input_excel, output_excel, max_workers=2):
             if completed % 100 == 0:
                 logger.info(f"İlerleme: {completed}/{len(urls)} ({completed*100//len(urls)}%)")
     
-    # DataFrame oluştur
     df_output = pd.DataFrame(results)
     
-    # Excel'e kaydet
-    logger.info(f"\n\nExcel kaydediliyor: {output_excel}")
+    logger.info(f"\nExcel kaydediliyor: {output_excel}")
     df_output.to_excel(output_excel, index=False, engine='openpyxl')
     
     logger.info(f"\n✓ TAMAMLANDI! {len(results)} urun islendi.")
@@ -294,19 +281,14 @@ def process_urls(input_excel, output_excel, max_workers=2):
 # KULLANIM
 if __name__ == "__main__":
     
-    # Dosya yolları
     input_file = "/Users/sukru/Downloads/input_urls.xlsx"
     output_file = f"/Users/sukru/Downloads/itmarket_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     
-    # GitHub Actions için: 8 worker (paralel)
-    # Local'de çalıştırırsan max_workers=4 ile test et
-    max_workers = int(__import__('os').getenv('MAX_WORKERS', '8'))
+    max_workers = int(__import__('os').getenv('MAX_WORKERS', '1'))
     
-    # İşleme başla
     try:
         df = process_urls(input_file, output_file, max_workers=max_workers)
         
-        # Özet göster
         logger.info("\n" + "="*80)
         logger.info("OZET:")
         logger.info("="*80)
@@ -314,7 +296,6 @@ if __name__ == "__main__":
         
     except FileNotFoundError:
         logger.error(f"\nHATA: Input dosyasi bulunamadi: {input_file}")
-        logger.error("\nLutfen 'input_urls.xlsx' adinda bir Excel dosyasi olusturun")
         logger.error("Ilk sutuna URL'leri yazin (baslik: 'Url' veya 'URL')")
         
     except Exception as e:
