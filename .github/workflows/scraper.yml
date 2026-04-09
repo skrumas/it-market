@@ -1,0 +1,54 @@
+name: IT Market Scraper
+
+on:
+  schedule:
+    - cron: '0 6 1,4,7,10,13,16,19,22,25,28 * *'   # 3 günde bir, 06:00 UTC (09:00 İstanbul)
+  workflow_dispatch:        # Manuel tetikleme butonu da olsun
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4 pandas openpyxl
+
+      - name: Run scraper
+        env:
+          MAX_WORKERS: '8'
+        run: |
+          python - <<'EOF'
+          import sys, os
+          sys.path.insert(0, '.')
+          
+          # itmarket_scraper_github.py içindeki process_urls'i import et
+          from itmarket_scraper_github import process_urls
+          from datetime import datetime
+          
+          input_file  = "input_urls.xlsx"
+          output_file = f"itmarket_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+          
+          max_workers = int(os.getenv('MAX_WORKERS', '8'))
+          
+          df = process_urls(input_file, output_file, max_workers=max_workers)
+          
+          print("\n=== ÖZET ===")
+          print(df.to_string(index=False))
+          EOF
+
+      - name: Upload results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: itmarket-results-${{ github.run_number }}
+          path: itmarket_results_*.xlsx
+          retention-days: 30   # 30 gün sakla, sonra silinir
