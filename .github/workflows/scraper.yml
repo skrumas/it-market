@@ -3,12 +3,17 @@ name: IT Market Scraper
 on:
   schedule:
     - cron: '0 6 1,4,7,10,13,16,19,22,25,28 * *'   # 3 günde bir, 06:00 UTC (09:00 İstanbul)
-  workflow_dispatch:        # Manuel tetikleme butonu da olsun
+  workflow_dispatch:        # Manuel tetikleme butonu
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 360   # 6 saat
+
+    strategy:
+      matrix:
+        chunk: [0, 1, 2]   # 3 parça paralel çalışır
+      fail-fast: false      # Biri patlarsa diğerleri durmasın
 
     steps:
       - name: Checkout repo
@@ -23,32 +28,94 @@ jobs:
         run: |
           pip install requests beautifulsoup4 pandas openpyxl
 
-      - name: Run scraper
+      - name: Run scraper (chunk ${{ matrix.chunk }})
         env:
-          MAX_WORKERS: '8'
+          CHUNK_INDEX: ${{ matrix.chunk }}
+          TOTAL_CHUNKS: '3'
         run: |
           python - <<'EOF'
           import sys, os
           sys.path.insert(0, '.')
-          
-          # itmarket_scraper_github.py içindeki process_urls'i import et
+
           from itmarket_scraper_github import process_urls
           from datetime import datetime
-          
+
+          chunk_index  = int(os.getenv('CHUNK_INDEX', '0'))
+          total_chunks = int(os.getenv('TOTAL_CHUNKS', '3'))
+
           input_file  = "input_urls.xlsx"
-          output_file = f"itmarket_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-          
-          max_workers = int(os.getenv('MAX_WORKERS', '8'))
-          
-          df = process_urls(input_file, output_file, max_workers=max_workers)
-          
-          print("\n=== ÖZET ===")
-          print(df.to_string(index=False))
+          output_file = f"itmarket_results_chunk{chunk_index}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+          # URL listesini chunk'a böl
+          import pandas as pd
+          df_input = pd.read_excel(input_file)
+          urls_all = df_input[df_input.columns[0]].dropna().tolist()
+          total    = len(urls_all)
+          size     = (total + total_chunks - 1) // total_chunks   # ceiling division
+          start    = chunk_index * size
+          end      = min(start + size, total)
+
+          print(f"Chunk {chunk_index}: URL {start}–{end} ({end - start} adet)")
+
+          # Geçici parça Excel yaz
+          df_chunk = pd.DataFrame({df_input.columns[0]: urls_all[start:end]})
+          df_chunk.to_excel("chunk_input.xlsx", index=False)
+
+          # Scrape et
+          df = process_urls("chunk_input.xlsx", output_file, max_workers=1)
+
+          print(f"\nChunk {chunk_index} tamamlandı: {len(df)} satır")
           EOF
 
-      - name: Upload results as artifact
+      - name: Upload chunk result
         uses: actions/upload-artifact@v4
         with:
-          name: itmarket-results-${{ github.run_number }}
-          path: itmarket_results_*.xlsx
-          retention-days: 30   # 30 gün sakla, sonra silinir
+          name: itmarket-chunk-${{ matrix.chunk }}-run${{ github.run_number }}
+          path: itmarket_results_chunk${{ matrix.chunk }}_*.xlsx
+          retention-days: 30
+
+  merge:
+    runs-on: ubuntu-latest
+    needs: scrape   # 3 job bittikten sonra çalışır
+
+    steps:
+      - name: Download all chunks
+        uses: actions/download-artifact@v4
+        with:
+          pattern: itmarket-chunk-*-run${{ github.run_number }}
+          merge-multiple: true
+          path: chunks/
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install pandas openpyxl
+
+      - name: Merge chunks into one Excel
+        run: |
+          python - <<'EOF'
+          import pandas as pd
+          import glob
+          from datetime import datetime
+
+          files = sorted(glob.glob("chunks/*.xlsx"))
+          print(f"Birleştirilecek dosyalar: {files}")
+
+          dfs = [pd.read_excel(f) for f in files]
+          df_merged = pd.concat(dfs, ignore_index=True)
+
+          output = f"itmarket_FINAL_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+          df_merged.to_excel(output, index=False, engine='openpyxl')
+
+          print(f"✓ Birleştirildi: {len(df_merged)} satır → {output}")
+          EOF
+
+      - name: Upload final merged result
+        uses: actions/upload-artifact@v4
+        with:
+          name: itmarket-FINAL-run${{ github.run_number }}
+          path: itmarket_FINAL_*.xlsx
+          retention-days: 30
